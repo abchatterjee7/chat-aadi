@@ -22,10 +22,16 @@ hljs.registerLanguage('mark', markdown); // Alias 'mark' to 'markdown'
 import { useChats } from "@/hooks/chat";
 import { CopyButton } from "@/components/CopyButton";
 
+type Message = {
+  id: number | string;
+  role: string;
+  content: string;
+};
+
 export default function ChatPage({ params }: { params: Promise<{ chatId: string }> }) {
   const { chatId } = use(params);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const [messages, setAllMessages] = useState<any[]>([]);
+  const [messages, setAllMessages] = useState<Message[]>([]);
   const router = useRouter();
 
   const hasFetched = useRef(false);
@@ -69,41 +75,7 @@ export default function ChatPage({ params }: { params: Promise<{ chatId: string 
     }
   }, [chatId, startPollingChat, router]);
 
-  if (error) {
-    return <div className="p-4 text-red-500">{error}</div>;
-  }
-
-  const fetchChat = async () => {
-    try {
-      const res = await fetch(`/api/chat/${chatId}/message`);
-      if (res.ok) {
-        const data = await res.json();
-        const lastMessage = data[data.length - 1];
-        if (lastMessage?.role === "user") sendPrompt(lastMessage.content);
-        else {
-          setAllMessages(data);
-        }
-        if (data.length === 1) {
-          // Clean up any existing polling
-          if (pollingCleanupRef.current) {
-            pollingCleanupRef.current();
-          }
-          // Start new polling and store cleanup function
-          pollingCleanupRef.current = startPollingChat(chatId);
-        }
-      }
-    } catch (err) {
-      console.error('Error fetching chat:', err);
-    }
-  };
-
-  const sendPrompt = async (prompt: string) => {
-    const tempUser = { id: Date.now(), role: "user", content: prompt };
-    setAllMessages(prev => [...prev, tempUser]);
-    await streamAssistantResponse(prompt);
-  };
-
-  const streamAssistantResponse = async (prompt: string) => {
+  const streamAssistantResponse = useCallback(async (prompt: string) => {
     try {
       const res = await fetch(`/api/chat/${chatId}/message`, {
         method: "POST",
@@ -133,7 +105,37 @@ export default function ChatPage({ params }: { params: Promise<{ chatId: string 
     } catch (err) {
       console.error("Error streaming assistant:", err);
     }
-  };
+  }, [chatId]);
+
+  const sendPrompt = useCallback(async (prompt: string) => {
+    const tempUser = { id: Date.now(), role: "user", content: prompt };
+    setAllMessages(prev => [...prev, tempUser]);
+    await streamAssistantResponse(prompt);
+  }, [streamAssistantResponse]);
+
+  const fetchChat = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/chat/${chatId}/message`);
+      if (res.ok) {
+        const data = await res.json();
+        const lastMessage = data[data.length - 1];
+        if (lastMessage?.role === "user") sendPrompt(lastMessage.content);
+        else {
+          setAllMessages(data);
+        }
+        if (data.length === 1) {
+          // Clean up any existing polling
+          if (pollingCleanupRef.current) {
+            pollingCleanupRef.current();
+          }
+          // Start new polling and store cleanup function
+          pollingCleanupRef.current = startPollingChat(chatId);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching chat:', err);
+    }
+  }, [chatId, sendPrompt, startPollingChat]);
 
   useEffect(() => {
     if (autoScroll && chatContainerRef.current) {
@@ -170,7 +172,11 @@ export default function ChatPage({ params }: { params: Promise<{ chatId: string 
       hasFetched.current = true;
       fetchChat();
     }
-  }, []);
+  }, [fetchChat]);
+
+  if (error) {
+    return <div className="p-4 text-red-500">{error}</div>;
+  }
 
   return (
     <div className="flex-1 flex flex-col h-full">
@@ -191,19 +197,21 @@ export default function ChatPage({ params }: { params: Promise<{ chatId: string 
                 </div>
               )}
               <ReactMarkdown
-                rehypePlugins={[rehypeHighlight as any]}
+                rehypePlugins={[rehypeHighlight]}
                 className="prose break-words max-w-none"
                 components={{
                   // Handle paragraphs
-                  p: ({ node, children, ...props }) => {
-                    // Check if the paragraph only contains a single code block
+                  p: ({ children, ...props }) => {
                     const childrenArray = React.Children.toArray(children);
-                    const hasPre = childrenArray.some(
-                      (child) => React.isValidElement(child) && child.type === 'pre'
+                    const hasBlockContent = childrenArray.some(
+                      (child) => React.isValidElement(child) && [
+                        'pre', 'div', 'blockquote', 'ul', 'ol', 'table',
+                        'h1', 'h2', 'h3', 'h4', 'h5', 'h6'
+                      ].includes(child.type as string)
                     );
                     
-                    if (hasPre) {
-                      return <div className="my-4">{children}</div>;
+                    if (hasBlockContent) {
+                      return <>{children}</>;
                     }
                     
                     // Check if the paragraph is empty or only contains whitespace
@@ -218,10 +226,10 @@ export default function ChatPage({ params }: { params: Promise<{ chatId: string 
                     return <p className="my-4" {...props}>{children}</p>;
                   },
                   // Handle code blocks
-                  pre: ({ node, children, ...props }) => {
+                  pre: ({ children }) => {
                     return <div className="my-4">{children}</div>;
                   },
-                  code({ node, inline, className, children, ...props }: any) {
+                  code({ inline, className, children, ...props }: React.ComponentPropsWithoutRef<'code'> & { inline?: boolean }) {
                     const match = /language-(\w+)/.exec(className || '');
                     const language = match ? match[1] : 'plaintext';
                     const codeContent = String(children).replace(/\n$/, '');
